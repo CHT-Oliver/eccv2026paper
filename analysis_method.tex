@@ -80,15 +80,18 @@ The update is plug-and-play and architecture-preserving.
 Long-context extrapolation for RoPE typically uses scaling, interpolation, or frequency remapping.
 These approaches improve stability for long sequences, but most analyses are frequency-local.
 Our perspective is complementary: we study the global second-order matrix after position aggregation and show that local smoothing is insufficient when cross-frequency blocks remain coupled.
+Boundary of our contribution: we do not propose another frequency schedule; we provide a structural criterion that explains when schedule-level fixes are insufficient.
 
 \subsection{Positional Encoding for Video-Language Models}
 Video-language models often apply multi-axis positional encoding across temporal and spatial axes.
 Prior studies indicate temporal encoding is the main bottleneck for long video.
 We provide a theoretical reason: temporal displacement grows with clip length, making temporal phase coverage increasingly sparse and error-prone under finite support.
+Boundary of our contribution: we retain standard multi-axis mRoPE and only intervene on the temporal slice during inference.
 
 \subsection{Attention Anisotropy and Spectral Perspectives}
 Anisotropy in representations and attention has been widely studied via covariance spectra, condition numbers, and effective-rank metrics.
 Our work extends this line by connecting mRoPE phase dynamics to block-structured covariance coupling, and then connecting spectral peakedness to attention coverage compression.
+Boundary of our contribution: beyond diagnosis, we derive a direct intervention rule from covariance dynamics.
 
 \section{Preliminaries and Problem Setup}
 
@@ -162,6 +165,16 @@ Its magnitude controls how strongly cross-block interactions survive after aggre
 \section{Theoretical Analysis}
 
 \subsection{Global Isotropy as Block-Structured Second-Order Decoupling}
+\noindent
+\fbox{%
+\parbox{0.97\linewidth}{%
+\textbf{Assumption Set A (minimal).}
+Temporal channels are organized as $m$ rotary $2\times2$ blocks;
+$\mathbf{M}$ in Eq.~\eqref{eq:M} is finite and positive semidefinite;
+global isotropy is measured by Eq.~\eqref{eq:isogap}.%
+}}
+
+\medskip
 Partition $\mathbf{M}$ into $m\times m$ blocks with $2\times2$ entries $\mathbf{M}^{(i,j)}$.
 Then
 \begin{theorem}[Exact isotropy decomposition]
@@ -173,11 +186,15 @@ Then
 \end{equation}
 \end{theorem}
 
-Eq.~\eqref{eq:decomp} shows two independent requirements for global isotropy:
-(1) each block should be internally isotropic, and
-(2) different blocks should be weakly coupled.
-Therefore, fixing only diagonal terms cannot remove global anisotropy if off-diagonal energy remains.
-This directly motivates our method to target both effects: spectral flattening inside heads and selective suppression where coupling-induced degeneration is strongest.
+\noindent\textbf{Condition.}
+Under Assumption Set A, Eq.~\eqref{eq:decomp} is an exact identity.
+\textbf{Result.}
+Global isotropy decomposes into intra-block isotropy and inter-block decoupling.
+\textbf{Explanation.}
+Reducing only diagonal anisotropy is insufficient if off-diagonal block energy persists.
+\textbf{Method implication.}
+Intervention must be selective across heads and target collapse patterns linked to cross-block coupling.
+\textit{Implication for SPECTRA:} use head-wise degradation sensing rather than uniform perturbation.
 
 \subsection{Discrete Phase Cancellation and Cross-Subspace Coupling}
 Using the geometric-series form,
@@ -198,7 +215,10 @@ Then
 \end{equation}
 This bound makes three points explicit:
 near-frequency pairs cancel slowly, finite $N$ limits cancellation, and non-stationary content leaves residual terms.
-Hence cross-subspace coupling is expected in realistic long-video settings, not an edge case.
+\textbf{When the bound is tight/loose.}
+The bound is tighter when cross-covariance drift $\Delta\mathbf{B}_{p}^{(i,j)}$ is small and looser under strong non-stationarity.
+Hence residual coupling is expected in realistic long-video settings, not an edge case.
+\textit{Implication for SPECTRA:} intervention strength should increase on heads exhibiting stronger finite-support degeneration.
 
 \subsection{Spectral Peakedness Implies Attention Coverage Compression}
 Under a second-order approximation,
@@ -209,16 +229,18 @@ Under a second-order approximation,
 \frac{1}{d_h}\lambda_{\max}(\mathbf{\Sigma}_Q)\Tr(\mathbf{\Sigma}_K).
 \label{eq:logit_var}
 \end{equation}
-When spectra are peaked, $\lambda_{\max}$ dominates and logits become more extreme.
-The softmax then concentrates mass on fewer keys, causing smaller Span@p and lower top-$k$ entropy.
-Therefore spectral flattening is directly tied to better attention coverage.
-This gives an operational objective for inference-time correction: reduce spectral dominance without retraining model weights.
+When spectra are peaked, $\lambda_{\max}$ dominates and raises logit variance.
+Higher logit variance increases softmax sharpness, which concentrates probability mass on fewer keys.
+Consequently Span@p decreases and top-$k$ entropy drops.
+Therefore spectral flattening is not only correlational; it is a direct mechanism to restore coverage.
+\textit{Implication for SPECTRA:} monitor spectral collapse with $r_{\eff}$ and flatten dominant modes at inference time.
 
 \subsection{Why Temporal-Only Intervention in mRoPE}
 For axis $a\in\{t,h,w\}$, phase excursion is $\Phi_{i,a}=\omega_i\Delta p_a$.
 In long-video inference, temporal displacement $\Delta p_t$ grows with clip length, while spatial displacements are bounded by frame size.
 As a result, temporal channels dominate phase-mismatch risk and residual coupling.
-This motivates a temporal-only intervention: it targets the main source of degradation while minimizing side effects on spatial semantics.
+This motivates a temporal-only intervention: it offers the highest leverage per perturbation while minimizing side effects on spatial semantics.
+\textit{Implication for SPECTRA:} apply updates only on temporal dimensions and preserve spatial channels.
 
 \section{Method}
 
@@ -241,6 +263,12 @@ The design is strictly plug-and-play: no weight update, no architecture change.
 \item From temporal phase dominance (Sec.~4.4): intervention is temporal-only to maximize gain and limit semantic side effects.
 \end{itemize}
 
+\noindent\textbf{Implementation Contract.}
+\textbf{Input:} per-layer Q/K tensors, video-token mask, temporal-dimension mask.
+\textbf{Output:} Q/K tensors with only temporal slices of valid video tokens modified.
+\textbf{Execution scope:} prefill only, no parameter update.
+\textbf{Complexity convention:} report added FLOPs as $\mathcal{O}(H\,N_v\,d_t\,r)$ per intervened layer, excluding base attention cost.
+
 \subsection{Spectral-Rank-Aware Degradation Signal}
 For layer $l$, head $h$, collect temporal features $\mathbf{X}_{l,h}\in\R^{N_v\times d_t}$.
 Let top-$r$ singular values be $\sigma_{l,h,1}\ge\cdots\ge\sigma_{l,h,r}$.
@@ -256,6 +284,7 @@ r_{\eff}(l,h)=\exp\!\left(-\sum_{i=1}^{r}p_{l,h,i}\log(p_{l,h,i}+\epsilon)\right
 \label{eq:reff_head}
 \end{equation}
 A smaller $r_{\eff}(l,h)$ means stronger concentration and stronger need for correction.
+Failure boundary: if singular values are nearly flat but task failure comes from semantics instead of anisotropy, $r_{\eff}$ may under-trigger correction.
 
 \subsection{Dual Gating: Layer $\times$ Head}
 Layer gate:
@@ -277,7 +306,8 @@ Final strength:
 \alpha_{l,h}=G_l\,G_{l,h}.
 \label{eq:alpha}
 \end{equation}
-This gate design concentrates intervention on strongly degraded heads inside stressed layers.
+Monotonicity: with fixed layer statistics, $G_{l,h}$ is non-increasing in $r_{\eff}(l,h)$, so more collapsed heads receive stronger updates.
+Extreme cases: if all heads are healthy, both gates approach $0$; if one head is strongly degraded, that head receives maximal relative strength.
 
 \subsection{Training-Free Injection and Complexity}
 For each temporal vector $\mathbf{x}_{l,h,p}$ (Q or K), sample
@@ -312,20 +342,38 @@ With truncated rank $r$, per-layer overhead is
 \mathcal{O}(H\,N_v\,d_t\,r)
 \end{equation}
 plus linear-time interpolation.
-In practice, this is modest because the module is temporal-only and prefill-only.
+In practice, overhead is modest because SPECTRA is temporal-only, prefill-only, and uses truncated rank.
 
 \section{Experiments}
-This section is reserved and will be filled later.
+
+\subsection{Experimental Setup}
+This subsection is reserved for datasets, evaluation protocols, baselines, and implementation details.
+
+\subsection{Main Results}
+This subsection is reserved for primary benchmark comparisons under long-video settings.
+
+\subsection{Mechanism Validation: Spectrum and Coverage}
+This subsection is reserved for validating the theoretical chain from spectral flattening to coverage improvement.
+
+\subsection{Layer/Head Heterogeneity and Gate Behavior}
+This subsection is reserved for analyzing gate allocation patterns across layers and heads.
+
+\subsection{Ablation Studies}
+This subsection is reserved for component-wise ablations of degradation signal, dual gating, and injection design.
+
+\subsection{Discussion}
+This subsection is reserved for broader interpretation, practical implications, and failure cases observed in experiments.
 
 \section{Limitations}
-Our analysis is second-order and does not explicitly model higher-order token interactions.
-The current derivation also assumes isotropic Gaussian anchors; richer anchor distributions may improve adaptivity.
-Finally, while temporal-only intervention is theoretically motivated, very high-motion scenes may benefit from joint temporal-spatial adaptation.
+Our analysis is second-order and does not explicitly model higher-order token interactions; this can be tested by adding higher-order diagnostics and checking whether they explain residual errors beyond spectral metrics.
+The current derivation assumes isotropic Gaussian anchors; this can be relaxed by comparing anisotropic or learned anchors under the same inference budget.
+Temporal-only intervention is motivated for long-video regimes, but extreme high-motion cases may require coupled temporal-spatial correction; this can be verified by controlled motion-stratified evaluation.
 
 \section{Conclusion}
 We presented a mechanism-first account of long-video attention collapse in mRoPE-based VLMs.
 The analysis shows that finite-support phase effects induce cross-block coupling, which sharpens spectra and compresses coverage.
 Based on this chain, SPECTRA provides a training-free, architecture-preserving temporal intervention with explicit covariance-level behavior.
-The framework is designed to be directly testable in experiments and extensible to stronger adaptive variants.
+Necessity boundary: without controlling cross-block-induced spectral concentration, long-range coverage degradation is expected to persist.
+Sufficiency boundary: SPECTRA addresses this mechanism directly, but full task optimality may still depend on model semantics and data quality.
 
 \end{document}
